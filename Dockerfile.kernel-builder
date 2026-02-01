@@ -1,0 +1,41 @@
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install cross-compilation toolchain and kernel build dependencies
+# Split into layers for better caching
+RUN apt-get update && apt-get install -y \
+    gcc-aarch64-linux-gnu \
+    binutils-aarch64-linux-gnu \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN apt-get update && apt-get install -y \
+    bc \
+    bison \
+    flex \
+    libssl-dev \
+    libelf-dev \
+    dwarves \
+    device-tree-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN apt-get update && apt-get install -y \
+    python3 \
+    rsync \
+    git \
+    make \
+    curl \
+    kmod \
+    cpio \
+    xz-utils \
+    file \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set up cross-compilation environment
+ENV ARCH=arm64
+ENV CROSS_COMPILE=aarch64-linux-gnu-
+
+WORKDIR /build
+
+# Pre-create output directories to speed up volume mounting
+RUN mkdir -p /build/output/{boot,modules,dtbs}

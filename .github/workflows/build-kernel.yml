@@ -1,0 +1,134 @@
+name: Build CM5 EFI Kernel with Alpine
+
+on:
+  push:
+    branches: [ master, develop ]
+  pull_request:
+    branches: [ master ]
+  workflow_dispatch:
+    inputs:
+      kernel_branch:
+        description: 'Raspberry Pi kernel branch'
+        required: false
+        default: 'rpi-6.12.y'
+      alpine_version:
+        description: 'Alpine Linux version'
+        required: false
+        default: '3.23.0'
+      include_alpine:
+        description: 'Include Alpine rootfs'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+jobs:
+  build-complete-system:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Free up disk space
+      run: |
+        sudo rm -rf /usr/share/dotnet
+        sudo rm -rf /usr/local/lib/android
+        sudo rm -rf /opt/ghc
+        df -h
+    
+    - name: Cache kernel source
+      uses: actions/cache@v4
+      with:
+        path: /tmp/cm5-kernel-source
+        key: kernel-source-${{ github.event.inputs.kernel_branch || 'rpi-6.12.y' }}
+        restore-keys: |
+          kernel-source-
+    
+    - name: Build kernel builder image
+      run: |
+        docker build \
+          -f Dockerfile.kernel-builder \
+          -t cm5-kernel-builder \
+          --cache-from cm5-kernel-builder:latest \
+          .
+    
+    - name: Build CM5 EFI kernel
+      env:
+        KERNEL_BRANCH: ${{ github.event.inputs.kernel_branch || 'rpi-6.12.y' }}
+      run: |
+        mkdir -p /tmp/cm5-build-output /tmp/cm5-kernel-source
+        docker run --rm \
+          -v ${{ github.workspace }}:/workspace \
+          -v /tmp/cm5-build-output:/build/output \
+          -v /tmp/cm5-kernel-source:/build/linux \
+          -e KERNEL_BRANCH=${KERNEL_BRANCH} \
+          -e KERNEL_SRC=/build/linux \
+          cm5-kernel-builder \
+          bash /workspace/build-kernel.sh
+    
+    - name: Verify kernel build
+      run: bash ${{ github.workspace }}/verify-build.sh /tmp/cm5-build-output
+    
+    - name: Prepare Alpine rootfs
+      if: github.event.inputs.include_alpine != 'false'
+      run: |
+        sudo apt-get update && sudo apt-get install -y wget rsync
+        bash ${{ github.workspace }}/prepare-alpine-rootfs.sh \
+          /tmp/alpine-rootfs /tmp/cm5-build-output
+    
+    - name: Compile U-Boot boot script
+      run: |
+        sudo apt-get install -y u-boot-tools
+        bash ${{ github.workspace }}/compile-boot-script.sh
+    
+    - name: Package artifacts
+      run: |
+        mkdir -p artifacts
+        cd /tmp/cm5-build-output
+        tar -czf ${{ github.workspace }}/artifacts/cm5-boot-files.tar.gz boot/
+        tar -czf ${{ github.workspace }}/artifacts/cm5-dtbs.tar.gz dtbs/
+        tar -czf ${{ github.workspace }}/artifacts/cm5-modules.tar.gz modules/
+        cp build-info.txt ${{ github.workspace }}/artifacts/
+        cp ${{ github.workspace }}/boot.scr ${{ github.workspace }}/artifacts/ || true
+    
+    - name: Package Alpine rootfs
+      if: github.event.inputs.include_alpine != 'false'
+      run: |
+        cd /tmp/alpine-rootfs
+        sudo tar -czf ${{ github.workspace }}/artifacts/alpine-rootfs.tar.gz .
+        cd ${{ github.workspace }}/artifacts
+        tar -czf cm5-complete-system.tar.gz \
+          cm5-boot-files.tar.gz cm5-dtbs.tar.gz cm5-modules.tar.gz \
+          alpine-rootfs.tar.gz boot.scr build-info.txt
+    
+    - name: Generate checksums
+      run: cd artifacts && sha256sum * > SHA256SUMS
+    
+    - name: Get kernel version
+      id: kver
+      run: |
+        KVER=$(ls /tmp/cm5-build-output/modules/lib/modules/ | head -n1)
+        echo "version=${KVER}" >> $GITHUB_OUTPUT
+    
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: cm5-system-${{ steps.kver.outputs.version }}
+        path: artifacts/
+        retention-days: 90
+    
+    - name: Create release
+      if: startsWith(github.ref, 'refs/tags/')
+      uses: softprops/action-gh-release@v1
+      with:
+        files: artifacts/*
+        body: |
+          **Kernel:** ${{ steps.kver.outputs.version }}
+          **Alpine:** ${{ github.event.inputs.alpine_version || '3.23.0' }}
+          
+          Download `cm5-complete-system.tar.gz` for everything.
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
